@@ -33,6 +33,7 @@ final class AwlClient {
     static final int T_INPUT = 9;     /* input event literal translation (ONEWAY hot path) */
     static final int T_IME = 10;      /* IME text passthrough (ONEWAY) */
     static final int T_CLIPBOARD = 11; /* Android clipboard text → wl selection (ONEWAY) */
+    static final int T_CFG_GET = 12;   /* (key) → daemon-owned config value */
     static final int T_CLOSE = 14;    /* (id) → ok: ask the client to close the window */
     static final int T_ICON = 15;     /* (id) → w,h,bytes[RGBA] toplevel icon */
     static final int T_SUBSCRIBE = 16;   /* (eventBinder) → ok: window lifecycle events */
@@ -76,6 +77,29 @@ final class AwlClient {
     }
 
     static boolean available() { return get() != null; }
+
+    /** Read daemon-owned window policy shared by the host APK and libawl
+     *  consumers. Returns -1 when the daemon is unavailable or the key is
+     *  unknown. */
+    static int configGet(String key) {
+        IBinder b = get();
+        if (b == null) return -1;
+        Parcel d = Parcel.obtain();
+        Parcel r = Parcel.obtain();
+        try {
+            d.writeInterfaceToken(DESCRIPTOR);
+            d.writeString(key);
+            b.transact(T_CFG_GET, d, r, 0);
+            return r.dataSize() >= 4 ? r.readInt() : -1;
+        } catch (Exception e) {
+            Log.e(TAG, "CFG_GET transact failed", e);
+            s = null;
+            return -1;
+        } finally {
+            d.recycle();
+            r.recycle();
+        }
+    }
 
     static int surface(long id, int w, int h, Surface surface, IBinder deathToken,
                        long host) {

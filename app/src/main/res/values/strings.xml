@@ -17,6 +17,8 @@
     <string name="dialog_ok">OK</string>
 
     <!-- WlSettingsActivity -->
+    <string name="status_bar_tip">Reserve Android’s status-bar and display-cutout safe area so camera cutouts do not cover window controls:</string>
+    <string name="status_bar">Show Android status bar</string>
     <string name="ime_mode_tip">When the soft keyboard opens, the wayland window:</string>
     <string name="ime_mode_inset">Inset (surface shrinks above the keyboard, client reflows)</string>
     <string name="ime_mode_overlay">Overlay (keyboard floats over the window, surface unchanged)</string>

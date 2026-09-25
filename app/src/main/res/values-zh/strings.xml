@@ -17,6 +17,8 @@
     <string name="dialog_ok">确定</string>
 
     <!-- WlSettingsActivity -->
+    <string name="status_bar_tip">保留 Android 状态栏和屏幕开孔的安全区域，避免前置摄像头遮挡窗口控件:</string>
+    <string name="status_bar">显示 Android 状态栏</string>
     <string name="ime_mode_tip">软键盘弹出时 wayland 窗口的显示:</string>
     <string name="ime_mode_inset">让位（surface 缩到键盘上方, 客户端 reflow）</string>
     <string name="ime_mode_overlay">覆盖（键盘悬浮在窗口上层, surface 不变）</string>

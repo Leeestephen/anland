@@ -24,7 +24,24 @@ public class WlSettingsActivity extends Activity {
         root.setOrientation(android.widget.LinearLayout.VERTICAL);
         root.setPadding(48, 64, 48, 48);
 
+        /* ---- Android status bar / display-cutout safe area ---- */
+        TextView statusBarTip = new TextView(this);
+        statusBarTip.setText(R.string.status_bar_tip);
+        root.addView(statusBarTip);
+
+        android.widget.Switch statusBarSw = new android.widget.Switch(this);
+        statusBarSw.setText(R.string.status_bar);
+        statusBarSw.setChecked(WlBinder.configGet("show_status_bar") == 1);
+        /* Foreground windows re-read this daemon-owned setting on resume. */
+        statusBarSw.setOnCheckedChangeListener((b, on) ->
+                WlBinder.configSet("show_status_bar", on ? 1 : 0));
+        root.addView(statusBarSw);
+
         /* ---- IME display mode ---- */
+        android.widget.Space gap1 = new android.widget.Space(this);
+        gap1.setMinimumHeight(64);
+        root.addView(gap1);
+
         TextView imeTip = new TextView(this);
         imeTip.setText(R.string.ime_mode_tip);
         root.addView(imeTip);

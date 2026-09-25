@@ -1185,7 +1185,9 @@ static awl_window_callbacks_t k_cbs = {
  * from the wayland client app itself (SURFACE uid pass); toggled over
  * CFG_GET/SET as 0/1 or by hand in config.json (new windows only).
  * "xwayland_scale" (default true): apply the daemon zoom to XWayland resize
- * commands; toggled over CFG_GET/SET or by hand in config.json. */
+ * commands; toggled over CFG_GET/SET or by hand in config.json.
+ * "show_status_bar" (default false): Android host activities show the status
+ * bar and reserve its display-cutout-safe area; applied when they resume. */
 
 #define AWL_CFG_PATH "/data/adb/modules/anland-awl/config.json"
 
@@ -1194,6 +1196,7 @@ static int g_cfg_zoom = 100;       /* persisted mirror (real state lives in the 
 static int g_cfg_init_w = 800;     /* initial-configure placeholder (#33; mirror of g_srv.init_conf_*) */
 static int g_cfg_init_h = 600;
 static int g_cfg_scale_mode = 0;   /* view mapping mode (#34; mirror of g_srv.scale_mode, AWL_SCALE_*) */
+static std::atomic_bool g_cfg_show_status_bar{false}; /* Android host reserves status/cutout insets */
 static char g_sock_dir[256] = "/data/local/tmp/awl";   /* runtime_dir (startup-loaded; see above) */
 static bool g_sock_listen = true;                      /* socket_listen (same) */
 /* runtime_dir for the mini-wm control socket (xwm_send_cmd): written once in
@@ -1209,6 +1212,7 @@ static bool cfg_domain(const std::string& key, int* lo, int* hi) {
     if (key == "xwayland_scale") { *lo = 0; *hi = 1; return true; }
     if (key == "auto_attach") { *lo = 0; *hi = 1; return true; }
     if (key == "sc_enabled") { *lo = 0; *hi = 1; return true; }
+    if (key == "show_status_bar") { *lo = 0; *hi = 1; return true; }
     return false;
 }
 
@@ -1270,10 +1274,12 @@ static void cfg_save_locked(void) {
     fprintf(f, "{\n  \"zoom\": %d,\n  \"init_w\": %d,\n  \"init_h\": %d,\n"
                "  \"scale_mode\": %d,\n  \"xwayland_scale\": %d,\n"
                "  \"auto_attach\": %d,\n  \"sc_enabled\": %d,\n"
+               "  \"show_status_bar\": %d,\n"
                "  \"runtime_dir\": \"%s\",\n  \"socket_listen\": %d\n}\n",
             g_cfg_zoom, g_cfg_init_w, g_cfg_init_h, g_cfg_scale_mode,
             g_cfg_xwayland_scale.load(std::memory_order_relaxed) ? 1 : 0,
             g_cfg_auto_attach ? 1 : 0, g_cfg_sc.load(std::memory_order_relaxed) ? 1 : 0,
+            g_cfg_show_status_bar.load(std::memory_order_relaxed) ? 1 : 0,
             rt, sl);
     if (fclose(f) != 0)
         LOGE("config save flush: %s", strerror(errno));
@@ -1378,6 +1384,13 @@ static void cfg_load_and_apply(void) {
     } else if (sc != -1) {
         LOGE("config: sc_enabled=%d out of range (0..1), ignored", sc);
     }
+    int status_bar = cfg_parse_int(buf, "show_status_bar");
+    if (status_bar == 0 || status_bar == 1) {
+        g_cfg_show_status_bar.store(status_bar != 0, std::memory_order_relaxed);
+        LOGI("config: show_status_bar=%s", status_bar ? "true" : "false");
+    } else if (status_bar != -1) {
+        LOGE("config: show_status_bar=%d out of range (0..1), ignored", status_bar);
+    }
 }
 
 /* set: apply → persist (apply first, write second; a write failure only warns — the live value stays in effect) */
@@ -1445,6 +1458,13 @@ static int cfg_set(const std::string& key, int32_t val) {
             cfg_save_locked();
         }
         LOGI("config set sc_enabled=%d (new attaches + persisted)", val);
+    } else if (key == "show_status_bar") {
+        g_cfg_show_status_bar.store(val != 0, std::memory_order_relaxed);
+        {
+            std::lock_guard<std::mutex> lk(g_cfg_lock);
+            cfg_save_locked();
+        }
+        LOGI("config set show_status_bar=%d (host activities apply on resume)", val);
     }
     return 0;
 }
@@ -2037,6 +2057,8 @@ static binder_status_t host_on_transact(AIBinder* binder, transaction_code_t cod
             v = g_cfg_auto_attach ? 1 : 0;
         }
         else if (key == "sc_enabled") v = g_cfg_sc.load(std::memory_order_relaxed) ? 1 : 0;
+        else if (key == "show_status_bar")
+            v = g_cfg_show_status_bar.load(std::memory_order_relaxed) ? 1 : 0;
         else LOGE("config get: unknown key '%s'", key.c_str());
         AParcel_writeInt32(out, v);
         return STATUS_OK;

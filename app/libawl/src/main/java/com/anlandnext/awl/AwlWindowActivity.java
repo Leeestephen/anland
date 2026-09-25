@@ -113,7 +113,10 @@ public class AwlWindowActivity extends Activity {
     private InputMethodManager imm;
     private CtrlBinder ctrl;
     private int lastW, lastH;
-    private int lastImeMargin = -1;
+    private int lastInsetLeft = -1, lastInsetTop = -1;
+    private int lastInsetRight = -1, lastInsetBottom = -1;
+    private int surfaceInputX, surfaceInputY;
+    private boolean showStatusBar;
     private boolean attached;
     private boolean finishingByGone;   /* client closed the window / evicted, nothing left to report */
     private boolean deathLinked;       /* daemon death monitoring attached */
@@ -520,29 +523,56 @@ public class AwlWindowActivity extends Activity {
         root.setFitsSystemWindows(false);
         root.addView(sv, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        sv.addOnLayoutChangeListener((v, left, top, right, bottom,
+                                      oldLeft, oldTop, oldRight, oldBottom) -> {
+            int[] pos = new int[2];
+            v.getLocationInWindow(pos);
+            surfaceInputX = pos[0];
+            surfaceInputY = pos[1];
+        });
         root.addView(hiddenInput, new FrameLayout.LayoutParams(1, 1));
-        /* IME inset: in inset mode the surface yields (client reflows); in overlay mode the keyboard floats above */
+        /* System safe area + IME inset: the SurfaceView size is the Wayland
+         * output size, so changing these margins reconfigures the client. */
         root.setOnApplyWindowInsetsListener((v, insets) -> {
-            applyImeInset(insets);
+            applyWindowInsets(insets);
             return insets;
         });
         setContentView(root);
 
-        setupFullscreen();   /* immersive */
+        refreshSystemBars();
     }
 
-    /* Immersive fullscreen: hide status bar + navigation bar, swipe-revealed
-     * as transient overlays, extend into the display cutout area. */
-    private void setupFullscreen() {
+    /* The navigation bar stays immersive in both modes.  show_status_bar is
+     * daemon-owned so the same policy reaches host and third-party libawl
+     * activities; absent/daemon-down preserves the historical fullscreen
+     * default.  Insets are applied separately because decor-fits must remain
+     * off for the existing freeform-window and IME behavior. */
+    private void refreshSystemBars() {
+        showStatusBar = AwlClient.configGet("show_status_bar") == 1;
+        if (showStatusBar)
+            getWindow().clearFlags(android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN);
+        else
+            getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN);
+
         android.view.WindowInsetsController ic = getWindow().getInsetsController();
         if (ic != null) {
-            ic.hide(android.view.WindowInsets.Type.statusBars()
-                  | android.view.WindowInsets.Type.navigationBars());
+            if (showStatusBar) {
+                getWindow().setStatusBarColor(android.graphics.Color.BLACK);
+                ic.setSystemBarsAppearance(0,
+                    android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS);
+                ic.show(android.view.WindowInsets.Type.statusBars());
+                ic.hide(android.view.WindowInsets.Type.navigationBars());
+            } else {
+                ic.hide(android.view.WindowInsets.Type.statusBars()
+                      | android.view.WindowInsets.Type.navigationBars());
+            }
             ic.setSystemBarsBehavior(
                 android.view.WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
         }
         getWindow().getAttributes().layoutInDisplayCutoutMode =
             android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
+        if (root != null) root.requestApplyInsets();
+        Log.i(TAG, "Android status bar " + (showStatusBar ? "shown" : "hidden"));
     }
 
     /** Recents entry: last known client title + last fetched toplevel icon.
@@ -667,7 +697,7 @@ public class AwlWindowActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
-        setupFullscreen();   /* the system may reset immersive mode */
+        refreshSystemBars();   /* setting may have changed; system may reset immersive mode */
         Awl.registerCallback(winEvents);
         Awl.acquire();   /* process event subscription (sibling windows dying while this one is foreground) */
         if (clipMgr != null)
@@ -793,13 +823,25 @@ public class AwlWindowActivity extends Activity {
         return getSharedPreferences("awl", MODE_PRIVATE).getInt("ime_mode", 0) != 0;
     }
 
-    private void applyImeInset(WindowInsets insets) {
+    private void applyWindowInsets(WindowInsets insets) {
         int imeBottom = insets.getInsets(WindowInsets.Type.ime()).bottom;
-        int margin = imeOverlayMode() ? 0 : imeBottom;
-        if (margin == lastImeMargin) return;
-        lastImeMargin = margin;
+        android.graphics.Insets safe = showStatusBar
+                ? insets.getInsetsIgnoringVisibility(WindowInsets.Type.statusBars()
+                                                    | WindowInsets.Type.displayCutout())
+                : android.graphics.Insets.NONE;
+        int bottom = Math.max(safe.bottom, imeOverlayMode() ? 0 : imeBottom);
+        if (safe.left == lastInsetLeft && safe.top == lastInsetTop
+                && safe.right == lastInsetRight && bottom == lastInsetBottom)
+            return;
+        lastInsetLeft = safe.left;
+        lastInsetTop = safe.top;
+        lastInsetRight = safe.right;
+        lastInsetBottom = bottom;
         FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) sv.getLayoutParams();
-        lp.bottomMargin = margin;
+        lp.leftMargin = safe.left;
+        lp.topMargin = safe.top;
+        lp.rightMargin = safe.right;
+        lp.bottomMargin = bottom;
         sv.setLayoutParams(lp);   /* surface resize → configure the client to reflow */
     }
 
@@ -1395,6 +1437,19 @@ public class AwlWindowActivity extends Activity {
 
     private boolean padInWin;      /* pointer enter/leave pairing (protocol requires enter first) */
 
+    /* Input is dispatched by the Activity in window coordinates. Insets can
+     * move the SurfaceView within that window; Wayland expects coordinates
+     * relative to the SurfaceView itself. The origin is cached on layout so
+     * motion hot paths do not allocate or query the view hierarchy. */
+    private float surfaceX(MotionEvent ev) { return ev.getX() - surfaceInputX; }
+    private float surfaceY(MotionEvent ev) { return ev.getY() - surfaceInputY; }
+    private float surfaceX(MotionEvent ev, int index) {
+        return ev.getX(index) - surfaceInputX;
+    }
+    private float surfaceY(MotionEvent ev, int index) {
+        return ev.getY(index) - surfaceInputY;
+    }
+
     private static boolean isTouchpad(MotionEvent ev) {
         return (ev.getSource() & InputDevice.SOURCE_CLASS_POINTER) != 0
                 && ev.getSource() != InputDevice.SOURCE_TOUCHSCREEN
@@ -1435,8 +1490,8 @@ public class AwlWindowActivity extends Activity {
             lastMouseY = confiney;
             break;
         default:
-            lastMouseX = ev.getX();
-            lastMouseY = ev.getY();
+            lastMouseX = surfaceX(ev);
+            lastMouseY = surfaceY(ev);
             break;
         }
         AwlClient.input(id, PTR_ENTER, 0, lastMouseX, lastMouseY, 0, 0, 0);
@@ -1467,7 +1522,7 @@ public class AwlWindowActivity extends Activity {
      * virtual position, sent as absolute motion. lastMouseX/Y always hold
      * the position the client believes the pointer is at. */
     private void handleMouseEvent(MotionEvent ev) {
-        float ex = ev.getX(), ey = ev.getY();
+        float ex = surfaceX(ev), ey = surfaceY(ev);
         float dx, dy;
         boolean sendabs;
         float x, y;
@@ -1585,7 +1640,7 @@ public class AwlWindowActivity extends Activity {
              * close the pointer stream. */
             if (padInWin) {
                 AwlClient.input(id, TOUCH_DOWN, ev.getPointerId(0),
-                        ev.getX(0), ev.getY(0), 0, 0, 0);
+                        surfaceX(ev, 0), surfaceY(ev, 0), 0, 0, 0);
                 endPadStream();
             }
         }
@@ -1617,7 +1672,7 @@ public class AwlWindowActivity extends Activity {
 
     private void sendTouch(int type, MotionEvent ev, int idx) {
         AwlClient.input(id, type, ev.getPointerId(idx),
-                       ev.getX(idx), ev.getY(idx), 0, 0, 0);
+                       surfaceX(ev, idx), surfaceY(ev, idx), 0, 0, 0);
     }
 
     /** Mouse/touchpad generic events: hover enter/move/exit + all buttons
@@ -1685,7 +1740,9 @@ public class AwlWindowActivity extends Activity {
                  * clamped virtual position, NONE = raw */
                 float px = 0f, py = 0f;
                 if (captureMode == CAPTURE_CONFINE) { px = confinex; py = confiney; }
-                else if (captureMode == CAPTURE_NONE) { px = ev.getX(); py = ev.getY(); }
+                else if (captureMode == CAPTURE_NONE) {
+                    px = surfaceX(ev); py = surfaceY(ev);
+                }
                 AwlClient.input(id, PTR_AXIS, 0, -v, h, px, py, 0);
             }
             return true;
